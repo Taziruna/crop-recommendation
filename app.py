@@ -17,7 +17,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
+ 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -116,27 +116,43 @@ div[data-testid="stButton"] > button:hover {
 }
 </style>
 """, unsafe_allow_html=True)
-
-
+ 
+ 
+# ── Month standardisation (matches notebook Cell 13 exactly) ─────────────────
+MONTH_MAP = {
+    'jan': 'January',  'feb': 'February', 'mar': 'March',
+    'apr': 'April',    'may': 'May',       'jun': 'June',
+    'jul': 'July',     'aug': 'August',    'sep': 'September',
+    'oct': 'October',  'nov': 'November',  'dec': 'December',
+}
+ 
+def std_month(v):
+    v = str(v).strip()
+    for sh, full in MONTH_MAP.items():
+        if v.lower().startswith(sh):
+            return full
+    return v
+ 
+ 
 @st.cache_resource(show_spinner="Loading models…")
 def load_artifacts():
     base = os.path.dirname(os.path.abspath(__file__))
-
+ 
     def lpkl(fname):
         fpath = os.path.join(base, fname)
         if not os.path.exists(fpath):
-            st.error(f"❌ Missing file: **{fname}** — please upload it to your Space.")
+            st.error(f"❌ Missing file: **{fname}** — please upload it to your repository.")
             st.stop()
         with open(fpath, 'rb') as f:
             return pickle.load(f)
-
+ 
     def lcsv(fname):
         fpath = os.path.join(base, fname)
         if not os.path.exists(fpath):
-            st.error(f"❌ Missing file: **{fname}** — please upload it to your Space.")
+            st.error(f"❌ Missing file: **{fname}** — please upload it to your repository.")
             st.stop()
         return pd.read_csv(fpath)
-
+ 
     return (
         lpkl('best_crop_classifier.pkl'),
         lpkl('best_yield_regressor.pkl'),
@@ -146,44 +162,101 @@ def load_artifacts():
         lpkl('seas_agg.pkl'),
         lpkl('train_medians.pkl'),
         lcsv('crop_info_lookup.csv'),
+        lcsv('SPAS-Dataset-BD.csv'),   # raw dataset for per-crop climate rows
     )
-
-
-cls_model, reg_model, enc, ds_agg, dist_agg, seas_agg, TRAIN_MEDIANS, crop_info = load_artifacts()
+ 
+ 
+cls_model, reg_model, enc, ds_agg, dist_agg, seas_agg, TRAIN_MEDIANS, crop_info_raw, df_raw = load_artifacts()
+ 
 le_district = enc['district']
 le_season   = enc['season']
 le_crop     = enc['crop']
-
+ 
+# ── Rebuild the cleaned df exactly as in the notebook ────────────────────────
+@st.cache_data(show_spinner=False)
+def build_df(_df_raw):
+    """Replicates notebook Cells 12–14 preprocessing so inference rows match training."""
+    df = _df_raw.copy()
+    df = df[df['Crop Name'] != '#REF!']
+    df = df.dropna(subset=['Season', 'District', 'Crop Name'])
+    df['Area']     = pd.to_numeric(df['Area'],     errors='coerce').fillna(0)
+    df['AP Ratio'] = pd.to_numeric(df['AP Ratio'], errors='coerce')
+    df['AP Ratio'] = df['AP Ratio'].fillna(df['AP Ratio'].median())
+    df = df[df['Area'] > 0].reset_index(drop=True)
+    for col in ['District', 'Season', 'Crop Name', 'Transplant', 'Harvest', 'Growth']:
+        df[col] = df[col].astype(str).str.strip()
+ 
+    # Humidity column swap — exactly as notebook Cell 12
+    df.rename(columns={
+        'Max Relative Humidity': '_tmp',
+        'Min Relative Humidity': 'Max Relative Humidity',
+    }, inplace=True)
+    df.rename(columns={'_tmp': 'Min Relative Humidity'}, inplace=True)
+ 
+    # Standardise transplant month labels (notebook Cell 13)
+    df['Transplant'] = df['Transplant'].apply(std_month)
+ 
+    # Derived features (notebook Cell 14)
+    df['Temp_Range']     = df['Max Temp'] - df['Min Temp']
+    df['Humidity_Range'] = df['Max Relative Humidity'] - df['Min Relative Humidity']
+    df['Log_Area']       = np.log1p(df['Area'])
+    df['AP_x_Area']      = df['AP Ratio'] * df['Log_Area']
+    df['Temp_x_Hum']     = df['Avg Temp'] * df['Avg Humidity']
+    df['Yield_per_Area'] = df['Production'] / (df['Area'] + 1)
+ 
+    return df
+ 
+ 
+df = build_df(df_raw)
+ 
+# ── Rebuild crop_info from the cleaned df (notebook Cell 20) ─────────────────
+@st.cache_data(show_spinner=False)
+def build_crop_info(_df):
+    return _df.groupby('Crop Name').agg(
+        Transplant=('Transplant', lambda x: x.mode()[0]),
+        Harvest=('Harvest',       lambda x: x.mode()[0]),
+        Growth=('Growth',         lambda x: x.mode()[0]),
+    ).reset_index()
+ 
+ 
+crop_info = build_crop_info(df)
+ 
+# ── Feature sets (identical to notebook Cells 18) ────────────────────────────
 CLASSIF_FEATURES = [
-    'District_Enc','Season_Enc',
-    'Avg Temp','Avg Humidity','Max Temp','Min Temp',
-    'Max Relative Humidity','Min Relative Humidity',
-    'Temp_Range','Humidity_Range','Temp_x_Hum',
-    'AP Ratio','Log_Area','AP_x_Area',
-    'ds_avg_temp','ds_avg_hum','ds_max_temp','ds_min_temp',
-    'ds_total_area','ds_n_crops','ds_mean_ap','ds_std_ap',
-    'dist_avg_temp','dist_avg_hum','dist_n_crops','dist_mean_ap',
-    'season_avg_temp','season_avg_hum','season_n_crops',
+    'District_Enc', 'Season_Enc',
+    'Avg Temp', 'Avg Humidity', 'Max Temp', 'Min Temp',
+    'Max Relative Humidity', 'Min Relative Humidity',
+    'Temp_Range', 'Humidity_Range', 'Temp_x_Hum',
+    'AP Ratio', 'Log_Area', 'AP_x_Area',
+    'ds_avg_temp', 'ds_avg_hum', 'ds_max_temp', 'ds_min_temp',
+    'ds_total_area', 'ds_n_crops', 'ds_mean_ap', 'ds_std_ap',
+    'dist_avg_temp', 'dist_avg_hum', 'dist_n_crops', 'dist_mean_ap',
+    'season_avg_temp', 'season_avg_hum', 'season_n_crops',
 ]
 REGRESS_FEATURES = CLASSIF_FEATURES + ['Crop_Enc', 'Yield_per_Area']
-
-
-def recommend(district, season, area, top_n=3):
+ 
+ 
+# ── Inference function — exact copy of notebook Cell 44 recommend_crop() ─────
+def recommend(district: str, season: str, area: float, top_n: int = 3):
+    district = district.strip()
+    season   = season.strip()
+ 
     dist_enc = int(le_district.transform([district])[0])
     seas_enc = int(le_season.transform([season])[0])
-
+ 
+    # Training-derived aggregate context (same as notebook)
     ds_row   = ds_agg[(ds_agg['District'] == district) & (ds_agg['Season'] == season)]
     dist_row = dist_agg[dist_agg['District'] == district]
     seas_row = seas_agg[seas_agg['Season'] == season]
-
-    def safe(row, col, fb):
-        return float(row[col].values[0]) if not row.empty and col in row else fb
-
+ 
+    def safe(row, col, fallback):
+        return float(row[col].values[0]) if not row.empty and col in row else fallback
+ 
     ds_avg_temp   = safe(ds_row,   'ds_avg_temp',    25.0)
     ds_avg_hum    = safe(ds_row,   'ds_avg_hum',     75.0)
     ds_max_temp   = safe(ds_row,   'ds_max_temp',    32.0)
     ds_min_temp   = safe(ds_row,   'ds_min_temp',    18.0)
-    ds_total_area = safe(ds_row,   'ds_total_area',5000.0)
+    ds_total_area = safe(ds_row,   'ds_total_area', 5000.0)
     ds_n_crops    = safe(ds_row,   'ds_n_crops',     10.0)
     ds_mean_ap    = safe(ds_row,   'ds_mean_ap',      1.0)
     ds_std_ap     = safe(ds_row,   'ds_std_ap',       0.1)
@@ -194,70 +267,114 @@ def recommend(district, season, area, top_n=3):
     seas_avg_temp = safe(seas_row, 'season_avg_temp', 25.0)
     seas_avg_hum  = safe(seas_row, 'season_avg_hum',  75.0)
     seas_n_crops  = safe(seas_row, 'season_n_crops',  20.0)
-
+ 
     log_area = float(np.log1p(area))
-    avg_t = ds_avg_temp; avg_h = ds_avg_hum
-    max_t = ds_max_temp; min_t = ds_min_temp
-    max_rh = min(avg_h + 10.0, 100.0); min_rh = max(avg_h - 10.0, 0.0)
-    ap = ds_mean_ap
-
-    records = [{
-        'Crop Name': crop, 'Yield_per_Area': 0.0,
-        'District_Enc': dist_enc, 'Season_Enc': seas_enc,
-        'Avg Temp': avg_t, 'Avg Humidity': avg_h,
-        'Max Temp': max_t, 'Min Temp': min_t,
-        'Max Relative Humidity': max_rh, 'Min Relative Humidity': min_rh,
-        'Temp_Range': max_t - min_t, 'Humidity_Range': max_rh - min_rh,
-        'Temp_x_Hum': avg_t * avg_h, 'AP Ratio': ap,
-        'Log_Area': log_area, 'AP_x_Area': ap * log_area,
-        'ds_avg_temp': ds_avg_temp, 'ds_avg_hum': ds_avg_hum,
-        'ds_max_temp': ds_max_temp, 'ds_min_temp': ds_min_temp,
-        'ds_total_area': ds_total_area, 'ds_n_crops': ds_n_crops,
-        'ds_mean_ap': ds_mean_ap, 'ds_std_ap': ds_std_ap,
-        'dist_avg_temp': dist_avg_temp, 'dist_avg_hum': dist_avg_hum,
-        'dist_n_crops': dist_n_crops, 'dist_mean_ap': dist_mean_ap,
-        'season_avg_temp': seas_avg_temp, 'season_avg_hum': seas_avg_hum,
-        'season_n_crops': seas_n_crops,
-    } for crop in le_crop.classes_]
-
+ 
+    # ── KEY FIX: use per-crop rows from the real dataset (notebook Cell 44) ──
+    # The notebook iterates over actual rows for the district+season subset,
+    # reading per-crop Avg Temp, Avg Humidity, Max/Min Temp, Max/Min RH, AP Ratio.
+    # The old app.py used only the district-season aggregate for all crops → wrong.
+    subset = df[(df['District'] == district) & (df['Season'] == season)]
+    if subset.empty:
+        return []
+ 
+    records = []
+    for _, row in subset.drop_duplicates('Crop Name').iterrows():
+        avg_t  = float(row['Avg Temp'])
+        avg_h  = float(row['Avg Humidity'])
+        max_t  = float(row['Max Temp'])
+        min_t  = float(row['Min Temp'])
+        max_rh = float(row['Max Relative Humidity'])
+        min_rh = float(row['Min Relative Humidity'])
+        ap     = float(row['AP Ratio'])
+        ypa    = float(row['Yield_per_Area']) if 'Yield_per_Area' in row else 0.0
+ 
+        records.append({
+            'Crop Name':              row['Crop Name'],
+            'Yield_per_Area':         ypa,
+            'District_Enc':           dist_enc,
+            'Season_Enc':             seas_enc,
+            'Avg Temp':               avg_t,
+            'Avg Humidity':           avg_h,
+            'Max Temp':               max_t,
+            'Min Temp':               min_t,
+            'Max Relative Humidity':  max_rh,
+            'Min Relative Humidity':  min_rh,
+            'Temp_Range':             max_t - min_t,
+            'Humidity_Range':         max_rh - min_rh,
+            'Temp_x_Hum':             avg_t * avg_h,
+            'AP Ratio':               ap,
+            'Log_Area':               log_area,
+            'AP_x_Area':              ap * log_area,
+            'ds_avg_temp':            ds_avg_temp,
+            'ds_avg_hum':             ds_avg_hum,
+            'ds_max_temp':            ds_max_temp,
+            'ds_min_temp':            ds_min_temp,
+            'ds_total_area':          ds_total_area,
+            'ds_n_crops':             ds_n_crops,
+            'ds_mean_ap':             ds_mean_ap,
+            'ds_std_ap':              ds_std_ap,
+            'dist_avg_temp':          dist_avg_temp,
+            'dist_avg_hum':           dist_avg_hum,
+            'dist_n_crops':           dist_n_crops,
+            'dist_mean_ap':           dist_mean_ap,
+            'season_avg_temp':        seas_avg_temp,
+            'season_avg_hum':         seas_avg_hum,
+            'season_n_crops':         seas_n_crops,
+        })
+ 
+    if not records:
+        return []
+ 
     df_cand = pd.DataFrame(records)
     X_cand  = df_cand[CLASSIF_FEATURES].fillna(pd.Series(TRAIN_MEDIANS)).values
+ 
+    # Score each candidate crop (same as notebook)
     proba        = cls_model.predict_proba(X_cand)
     classes_list = list(cls_model.classes_)
-
+ 
     crop_scores = []
     for i, crop in enumerate(df_cand['Crop Name']):
         try:
             ev    = int(le_crop.transform([crop])[0])
-            score = float(proba[i][classes_list.index(ev)])
+            score = float(proba[i][classes_list.index(ev)]) if ev in classes_list else 0.0
         except Exception:
             score = 0.0
         crop_scores.append((crop, score))
-
+ 
     crop_scores.sort(key=lambda x: x[1], reverse=True)
-
+ 
+    # ── Regression for top-n crops (notebook only runs regression for best crop,
+    #    but we run it for all top_n so the web UI can show production for each) ──
     results = []
     for rank, (crop, score) in enumerate(crop_scores[:top_n], 1):
         try:
-            cer    = int(le_crop.transform([crop])[0])
-            rrow   = df_cand[df_cand['Crop Name'] == crop].iloc[0]
-            rd     = {f: rrow[f] for f in CLASSIF_FEATURES}
-            rd['Crop_Enc'] = cer; rd['Yield_per_Area'] = 0.0
-            Xr   = pd.DataFrame([rd])[REGRESS_FEATURES].fillna(pd.Series(TRAIN_MEDIANS)).values
-            prod = max(0.0, float(reg_model.predict(Xr)[0]))
+            crop_enc_r = int(le_crop.transform([crop])[0])
+            bc_row     = df_cand[df_cand['Crop Name'] == crop].iloc[0]
+            reg_dict   = {f: bc_row[f] for f in CLASSIF_FEATURES}
+            reg_dict['Crop_Enc']       = crop_enc_r
+            reg_dict['Yield_per_Area'] = float(bc_row['Yield_per_Area'])
+            X_reg = pd.DataFrame([reg_dict])[REGRESS_FEATURES].fillna(
+                        pd.Series(TRAIN_MEDIANS)).values
+            prod = max(0.0, float(reg_model.predict(X_reg)[0]))
         except Exception:
             prod = 0.0
-
+ 
+        # Calendar lookup from freshly-rebuilt crop_info (notebook Cell 20)
         cal = crop_info[crop_info['Crop Name'] == crop]
         results.append({
-            'rank': rank, 'crop': crop, 'score': score, 'production': prod,
+            'rank':       rank,
+            'crop':       crop,
+            'score':      score,
+            'production': prod,
             'transplant': cal['Transplant'].values[0] if not cal.empty else 'N/A',
             'growth':     cal['Growth'].values[0]     if not cal.empty else 'N/A',
             'harvest':    cal['Harvest'].values[0]    if not cal.empty else 'N/A',
         })
+ 
     return results
-
-
+ 
+ 
 # ── Hero ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
@@ -272,21 +389,21 @@ st.markdown("""
     </div>
 </div>
 """, unsafe_allow_html=True)
-
+ 
 left, right = st.columns([1, 1.6], gap="large")
-
+ 
 with left:
     st.markdown('<span class="section-label">Input Parameters</span>', unsafe_allow_html=True)
     districts = sorted(le_district.classes_.tolist())
     seasons   = sorted(le_season.classes_.tolist())
-
+ 
     district = st.selectbox("📍 District", options=districts,
                              index=districts.index("Dhaka") if "Dhaka" in districts else 0)
     season   = st.selectbox("🗓️ Growing Season", options=seasons)
     area     = st.number_input("📐 Land Area (hectares)",
                                min_value=0.1, max_value=50000.0,
                                value=5.0, step=0.5, format="%.1f")
-
+ 
     season_info = {
         "Kharif 1": "☀️ April – July. Early monsoon. High temperature, increasing rainfall.",
         "Kharif 2": "🌧️ June – October. Main monsoon. High humidity and rainfall.",
@@ -300,12 +417,12 @@ with left:
         <div class="stat-chip">CV: <b>91.71%</b></div>
         <div class="stat-chip">R²: <b>0.9202</b></div>
     </div>""", unsafe_allow_html=True)
-
+ 
     run = st.button("🌱  Get Crop Recommendation", use_container_width=True)
-
+ 
 with right:
     st.markdown('<span class="section-label">Recommendation Results</span>', unsafe_allow_html=True)
-
+ 
     if not run:
         st.markdown("""
         <div class="placeholder-box">
@@ -320,7 +437,7 @@ with right:
             except Exception as e:
                 st.error(f"Error: {e}")
                 results = []
-
+ 
         if results:
             b   = results[0]
             bar = min(int(b['score'] * 100), 100)
@@ -349,7 +466,7 @@ with right:
                     </div>
                 </div>
             </div>""", unsafe_allow_html=True)
-
+ 
             if len(results) > 1:
                 st.markdown("""<p style="font-size:0.68rem;font-weight:700;letter-spacing:0.12em;
                     text-transform:uppercase;color:#6b7280;margin:0.8rem 0 0.5rem;">
@@ -379,14 +496,14 @@ with right:
                             </div>
                         </div>
                     </div>""", unsafe_allow_html=True)
-
+ 
             st.markdown(f"""
             <div class="input-summary">
                 📍 <b>{district}</b> &nbsp;·&nbsp; 🗓️ <b>{season}</b> &nbsp;·&nbsp; 📐 <b>{area:.1f} ha</b>
             </div>""", unsafe_allow_html=True)
         else:
             st.warning("No recommendations found. Please try a different district or season.")
-
+ 
 st.markdown("""
 <div class="footer">
     Smart Crop Recommendation System &nbsp;·&nbsp; Bangladesh &nbsp;·&nbsp;
