@@ -3,6 +3,13 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+import zipfile
+import os
+
+# Extract model if not already extracted
+if not os.path.exists("best_crop_classifier.pkl"):
+    with zipfile.ZipFile("best_crop_classifier.zip", "r") as zip_ref:
+        zip_ref.extractall()
 
 st.set_page_config(
     page_title="Smart Crop Recommendation — Bangladesh",
