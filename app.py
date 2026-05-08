@@ -378,7 +378,7 @@ def recommend(district: str, season: str, area: float, top_n: int = 3):
 # ── Hero ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-    <div class="hero-badge">🌾 Machine Learning · Bangladesh Agriculture</div>
+    <div class="hero-badge">🌾 Smart Agro Assistant Bangladesh </div>
     <div class="hero-title">Smart Crop Recommendation System</div>
     <p class="hero-sub">AI-powered crop advisory using climate and regional data from 64 districts across Bangladesh.</p>
     <div class="hero-stats">
@@ -405,9 +405,9 @@ with left:
                                value=5.0, step=0.5, format="%.1f")
  
     season_info = {
-        "Kharif 1": "☀️ April – July. Early monsoon. High temperature, increasing rainfall.",
-        "Kharif 2": "🌧️ June – October. Main monsoon. High humidity and rainfall.",
-        "Rabi":     "❄️ October – March. Winter/dry season. Cool temperatures, low rainfall.",
+        "Kharif 1": "☀️ March – June. Early monsoon. High temperature, increasing rainfall.",
+        "Kharif 2": "🌧️ July – October. Main monsoon. High humidity and rainfall.",
+        "Rabi":     "❄️ November – February. Winter/dry season. Cool temperatures, low rainfall.",
     }
     st.markdown(f'<div class="info-box">{season_info.get(season,"")}</div>', unsafe_allow_html=True)
     st.markdown("""
