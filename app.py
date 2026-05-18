@@ -402,7 +402,7 @@ with left:
     season   = st.selectbox("🗓️ Growing Season", options=seasons)
     area     = st.number_input("📐 Land Area (hectares)",
                                min_value=0.1, max_value=50000.0,
-                               value=5.0, step=1")
+                               value=5.0,step=0.5, format="%.1f")
  
     season_info = {
         "Kharif 1": "☀️ March – June. Early monsoon. High temperature, increasing rainfall.",
